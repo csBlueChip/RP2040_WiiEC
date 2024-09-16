@@ -151,6 +151,7 @@ int  main (void)
 
 	int      result          = 0;    // general usage
 
+
 	// --- Start the serial port ---
 	// ...only used here to send debug readings back to the console
 	stdio_init_all();  // https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
@@ -159,8 +160,10 @@ int  main (void)
 	        "# SDA=%d, SCL=%d, ADDR=0x%02X @ %dKHz\n",
 	        EC_I2C_SDA, EC_I2C_SCL, EC_I2C_ADDR, EC_I2C_KHZ );
 
+
 	// --- Setup Das Blinken Lights ---
 	ledInit();
+
 
 	// --- Initialise the i2c hardware ---
 	i2c_init(EC_I2C_DEV, EC_I2C_KHZ * 1000);       // NOT *1024, this is radio!
@@ -174,8 +177,10 @@ int  main (void)
 		gpio_pull_up(EC_I2C_SCL);
 #	endif
 
+
 	// --- Hardware initialised - game on ---
 	while (true) {
+
 		// --- Poll the i2c bus until a device responds on address EC_I2C_ADDR ---
 		printf("* Waiting for device...");
 		result = -999;
@@ -194,6 +199,7 @@ int  main (void)
 		}
 		printf("\n# Found device @ 0x%02X\n", EC_I2C_ADDR);
 
+
 		// --- Initialise in crypto bypass mode ---
 		// More details on the crypto here:
 		// https://github.com/csBlueChip/FlipperZero_WiiEC/blob/main/wii_i2c.c#L235
@@ -201,17 +207,25 @@ int  main (void)
 		uint8_t  init1[] = {EC_INIT_REG1, EC_INIT_DAT1};
 		uint8_t  init2[] = {EC_INIT_REG2, EC_INIT_DAT2};
 
+		// The sleep instructions are NOT actually required in this example code
+		//   because the printf() causes a sufficient deley
+		// They are included here to highlight that a (short) delay IS required after
+		//   each of the two init commands
 		result = i2c_write_blocking(EC_I2C_DEV, EC_I2C_ADDR, init1, sizeof(init1), false);
+		sleep_us(20);  // give the EC time to configure itself
 		printf( "# EC init-1 : {%02X=%02X}[%d]\n", init1[0], init1[1], result);
 		if (result != sizeof(init1))  goto lost ;  // Issue #1: goto's scare me ;)
 
 		result = i2c_write_blocking(EC_I2C_DEV, EC_I2C_ADDR, init2, sizeof(init2), false);
+		sleep_us(20);  // give the EC time to configure itself
 		printf( "# EC init-2 : {%02X=%02X}[%d]\n", init2[0], init2[1], result);
 		if (result != sizeof(init2))  goto lost ;
 
-		// Do NOT attempt to access the crypto registers {0x40..0x41}
-		// else the device will reset!
+
+		// Do NOT attempt to access the (standard) crypto registers {0x40..0x41}
+		//   else the device will reset!
 		(void)enc;  // avoid compiler warning "variable defined and not used"
+
 
 		// --- Get pid ---
 		printf("# Perhipheral ID   : ");
@@ -220,12 +234,14 @@ int  main (void)
 		if (result != EC_PID_LEN)  goto lost ;
 		printf(" - %s\n", identify(pid));
 
+
 		// --- Get calibration data ---
 		printf("# Calibration Data : ");
 		result = i2c_readBytes(EC_I2C_DEV, EC_I2C_ADDR, EC_CAL_BASE, EC_CAL_LEN, cal);
 		dump(EC_CAL_BASE, EC_CAL_LEN, cal, result);
 		if (result != EC_CAL_LEN)  goto lost ;
 		printf("\n");
+
 
 		// --- Read EC controls ---
 		printf("# Poll EC readings\n");
