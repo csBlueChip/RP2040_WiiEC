@@ -9,8 +9,12 @@
 
 #include  "wiiEC.h"
 
+
 //+============================================================================
-/*
+// debug: poll the entire i2c bus, 
+// return when the specified address starts responding
+//
+#if 0
 void  waitFor (uint8_t seek)
 {
 	bool gotEC = false;
@@ -30,7 +34,7 @@ void  waitFor (uint8_t seek)
 			else if (i2c_read_blocking(i2c0, addr, &rxdata, 1, false) >= 0)
 				printf("@");  // address was ACKed
 			else
-				printf(".");  // no device found
+				printf(".");  // address NOT ACKed
 
 			printf("%s", ((addr % 16) == 15) ? "\n" : "  ");
 
@@ -41,135 +45,206 @@ void  waitFor (uint8_t seek)
 		if (!gotCC)  sleep_ms(1000) ;
 	}
 }
-*/
+#endif
+
+//-----------------------------------------------------------------------------
+// Das blinken lights - for debugging without a console
+//
+#define   LED_PIN  PICO_DEFAULT_LED_PIN
+
+int  led = 0;  // initial state:  {0=Off, 1=On}
+
+//+====================================
+static inline
+void  ledInit (void)
+{
+	gpio_init(LED_PIN);
+	gpio_set_dir(LED_PIN, GPIO_OUT);
+	gpio_put(LED_PIN, led);
+}
+
+//+====================================
+static inline
+void  ledToggle (void)
+{
+	gpio_put(LED_PIN, (led = !led));
+}
+
+//-----------------------------------------------------------------------------
+// Convert PID to controller name
+//
+struct {
+	uint8_t      pid[6];
+	const char*  name;
+} known[] = {
+	{ {0x00, 0x00, 0xA4, 0x20, 0x00, 0x00}, "Nunchuck"                     },
+	{ {0xFF, 0x00, 0xA4, 0x20, 0x00, 0x00}, "Nunchuck (rev2)"              },
+	{ {0x00, 0x00, 0xA4, 0x20, 0x01, 0x01}, "Classic Controller"           },
+	{ {0x01, 0x00, 0xA4, 0x20, 0x01, 0x01}, "Classic Controller Pro"       },
+	{ {0x00, 0x00, 0xA4, 0x20, 0x04, 0x02}, "Balance Board"                },
+	{ {0x00, 0x00, 0xA4, 0x20, 0x01, 0x03}, "Guitar Hero Guitar"           },
+	{ {0x01, 0x00, 0xA4, 0x20, 0x01, 0x03}, "Guitar Hero World Tour Drums" },
+	{ {0x03, 0x00, 0xA4, 0x20, 0x01, 0x03}, "DJ Hero Turntable"            },
+	{ {0x00, 0x00, 0xA4, 0x20, 0x01, 0x11}, "Taiko Drum Controller)"       },
+	{ {0xFF, 0x00, 0xA4, 0x20, 0x00, 0x13}, "uDraw Tablet"                 },
+	{ {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, "-unknown-"                    }  // LAST!
+};
+
+//+====================================
+const char*  identify (uint8_t* pid)
+{
+	const char*  this;
+	for (int  i = 0;  i < sizeof(known) / sizeof(*known);  i++) {
+		this = known[i].name;
+		if (memcmp(known[i].pid, pid, sizeof(known[i].pid)) == 0)  break ;
+	}
+	return this;
+}
+
+//+============================================================================
+void  dump (int base,  int max,  uint8_t* data,  int len)
+{
+
+	printf("@ %02X = { ", base);
+	for (int i = 0;  i < max;  i++) {
+		if (i < len)  printf("%02X ", data[i]) ;
+		else          printf("-- ") ;
+	}
+	printf("}[%d]", len);
+}
 
 //+============================================================================
 // read 'len' bytes starting at register 'base' to memory 'dst'
 //
-int  i2c_read (i2c_inst_t *i2c,  uint8_t addr,
-                uint8_t reg1,  size_t len,  uint8_t *dst)
-{
-	// write out the base register number
-	i2c_write_blocking(i2c, addr, &reg1, 1, false/*nostop*/);
-
-	// wait for the EC chip to update its register pointer
-	// 150 is not quite long enough - 200 has been reliable for me
-	// ...my flipperzero code actually uses 300!
-	//    https://github.com/csBlueChip/FlipperZero_WiiEC/blob/main/wii_i2c.h#L32
-	sleep_us(200);
-
-	// read 'len' (8-bit) register values (starting with register 'base')
-	// and return the number of bytes read (or negative values for errors)
-	return i2c_read_blocking(EC_I2C_DEV, EC_I2C_ADDR, dst, len, false/*nostop*/);
-}
-
-//-----------------------------------------------------------------------------
-// We build the memory map in to this block
-//
 #define  I2C_MEM_MAX  (256)
-uint8_t  map[I2C_MEM_MAX] = {0};
 
-//+============================================================================
-uint8_t*  dumpBlock (uint8_t base,  int len,  bool lf)
+int  i2c_readBytes ( i2c_inst_t *i2c,  uint8_t addr,
+                     uint8_t base,  size_t len,  uint8_t *dst )
 {
 	assert(base+len <= I2C_MEM_MAX);
 
-	int  ret = i2c_read(EC_I2C_DEV, EC_I2C_ADDR, base, len, map+base);
+	int result;
 
-	// read failed
-	if (ret < 0)  return NULL ;
+	// write out the base register number
+	result = i2c_write_blocking(i2c, addr, &base, 1, false/*nostop*/);  // !nostop==stop
+	if (result != 1)  return PICO_ERROR_GENERIC ;
 
-	// dump results
-	printf("@ %02X = { ", base);
-	for (int i = 0;  i < len;  i++)  printf("%02X ", map[base+i]) ;
-	printf("}[%d]%s", ret, lf ? "\n" : "\r");
+	// wait for the EC chip to update its register pointer
+	// 150uS is not quite long enough - 200uS has been reliable for me
+	// ...my flipperzero code actually uses 300uS !
+	//  https://github.com/csBlueChip/FlipperZero_WiiEC/blob/main/wii_i2c.h#L32
+	sleep_us(200);
 
-	return map+base;
+	// read 'len' (8-bit) register values (starting with register 'base')
+	// and return the number of bytes read (negative values are errors)
+	return i2c_read_blocking(EC_I2C_DEV, EC_I2C_ADDR, dst, len, false/*nostop*/);
 }
 
 //++===========================================================================
 int  main (void)
 {
-	// --- start the serial port ---
-	stdio_init_all();
-	sleep_ms(3000);  // wait for serial monitor
+	// This are all the (known) EC user fields
+	uint8_t  enc[EC_ENC_LEN] = {0};  //  w : Encryption keys [not used]
+	uint8_t  pid[EC_PID_LEN] = {0};  // r  : Perhipheral ID
+	uint8_t  cal[EC_CAL_LEN] = {0};  // r  : Calibration data
+	uint8_t  joy[EC_JOY_LEN] = {0};  // r  : Joystick/Controlle data
+
+	int      result          = 0;    // general usage
+
+	// --- Start the serial port ---
+	// ...only used here to send debug readings back to the console
+	stdio_init_all();  // https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
+	sleep_ms(3000);    // give the serial monitor time to attach
 	printf( "\n\n# WiiEC demo\n"
 	        "# SDA=%d, SCL=%d, ADDR=0x%02X @ %dKHz\n",
 	        EC_I2C_SDA, EC_I2C_SCL, EC_I2C_ADDR, EC_I2C_KHZ );
 
-	// --- initialise the LED ---
-	int  led = 0;  // the current state of the LED (1=on)
-	gpio_init(PICO_DEFAULT_LED_PIN);
-	gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+	// --- Setup Das Blinken Lights ---
+	ledInit();
 
-	// --- initialise the i2c hardware ---
-	i2c_init(EC_I2C_DEV, EC_I2C_KHZ * 1000);
+	// --- Initialise the i2c hardware ---
+	i2c_init(EC_I2C_DEV, EC_I2C_KHZ * 1000);       // NOT *1024, this is radio!
 
 	gpio_set_function(EC_I2C_SDA, GPIO_FUNC_I2C);
 	gpio_set_function(EC_I2C_SCL, GPIO_FUNC_I2C);
 
-	// https://forums.raspberrypi.com/viewtopic.php?t=305742
-	//   The pico pull-ups are weak. Suggest external pull-ups:
-	//   "4.7k is a good place to start, but anything {2k .. 10k} should work"
-	// If you do not want to use external pull-ups and you are getting bad readings
-	//   dropping the i2c bus speed from 400KHz down to 100KHz might help 
-	//   ...intermediate values (eg. 250KHz) are out of spec
-#	define USING_EXTERNAL_PULLUPS  0  // this should be in a config file
-#	if (USING_EXTERNAL_PULLUPS == 0)
+#	if (EC_I2C_EXTPU != 1)                         // qv. wiiEC.h
 		// use internal pull-ups
 		gpio_pull_up(EC_I2C_SDA);
 		gpio_pull_up(EC_I2C_SCL);
 #	endif
 
+	// --- Hardware initialised - game on ---
 	while (true) {
-		// --- wait for our device to appear ---
+		// --- Poll the i2c bus until a device responds on address EC_I2C_ADDR ---
 		printf("* Waiting for device...");
-		while (true) {
-			uint8_t  rx;  // pico does not have an API for address scanning
-
-			gpio_put(PICO_DEFAULT_LED_PIN, (led = !led));  // toggle LED
-
-			// try to read a byte, to make sure the Address was ACKed
-			if (i2c_read_blocking(EC_I2C_DEV, EC_I2C_ADDR, &rx, 1, false) >= 0)
-				break ;
+		result = -999;
+		while (result < 0) {
+			// pico does not have an API for address scanning
+			// so we will issue a read for one byte,
+			// just to check if the address was ACKed
+			uint8_t  rx;
 			(void)rx;  // avoid compiler warning "variable set and not used"
 
-			sleep_ms(1000);  // wait 1 second
+			ledToggle();                           // das blinken lights
+			if (result != -999)  sleep_ms(1000) ;  // do not cook the RP2040
+
+			// result = number of bytes read, or < 0 for an error
+			result = i2c_read_blocking(EC_I2C_DEV, EC_I2C_ADDR, &rx, 1, false/*nostop*/);
 		}
 		printf("\n# Found device @ 0x%02X\n", EC_I2C_ADDR);
 
-		// --- EC init (no crypto) ---
+		// --- Initialise in crypto bypass mode ---
+		// More details on the crypto here:
+		// https://github.com/csBlueChip/FlipperZero_WiiEC/blob/main/wii_i2c.c#L235
+		// I don't normally declare variables inline, but it seems helpful here
 		uint8_t  init1[] = {EC_INIT_REG1, EC_INIT_DAT1};
 		uint8_t  init2[] = {EC_INIT_REG2, EC_INIT_DAT2};
 
-		printf( "# EC init-1 : {%02X=%02X}[%d]\n", init1[0], init1[1],
-			i2c_write_blocking(EC_I2C_DEV, EC_I2C_ADDR, init1, sizeof(init1), false) );
+		result = i2c_write_blocking(EC_I2C_DEV, EC_I2C_ADDR, init1, sizeof(init1), false);
+		printf( "# EC init-1 : {%02X=%02X}[%d]\n", init1[0], init1[1], result);
+		if (result != sizeof(init1))  goto lost ;  // Issue #1: goto's scare me ;)
 
-		printf( "# EC init-2 : {%02X=%02X}[%d]\n", init2[0], init2[1],
-			i2c_write_blocking(EC_I2C_DEV, EC_I2C_ADDR, init2, sizeof(init2), false) );
-
-		// --- get pid ---
-		printf("# Perhipheral ID   : ");
-		dumpBlock(EC_PID_REG1, EC_PID_LEN, true);
-
-		// --- get calibration data ---
-		printf("# Calibration Data : ");
-		dumpBlock(EC_CAL_REG1, EC_CAL_LEN, true);
+		result = i2c_write_blocking(EC_I2C_DEV, EC_I2C_ADDR, init2, sizeof(init2), false);
+		printf( "# EC init-2 : {%02X=%02X}[%d]\n", init2[0], init2[1], result);
+		if (result != sizeof(init2))  goto lost ;
 
 		// Do NOT attempt to access the crypto registers {0x40..0x41}
 		// else the device will reset!
+		(void)enc;  // avoid compiler warning "variable defined and not used"
 
-		// --- read EC controls ---
+		// --- Get pid ---
+		printf("# Perhipheral ID   : ");
+		result = i2c_readBytes(EC_I2C_DEV, EC_I2C_ADDR, EC_PID_BASE, EC_PID_LEN, pid);
+		dump(EC_PID_BASE, EC_PID_LEN, pid, result);
+		if (result != EC_PID_LEN)  goto lost ;
+		printf(" - %s\n", identify(pid));
+
+		// --- Get calibration data ---
+		printf("# Calibration Data : ");
+		result = i2c_readBytes(EC_I2C_DEV, EC_I2C_ADDR, EC_CAL_BASE, EC_CAL_LEN, cal);
+		dump(EC_CAL_BASE, EC_CAL_LEN, cal, result);
+		if (result != EC_CAL_LEN)  goto lost ;
+		printf("\n");
+
+		// --- Read EC controls ---
 		printf("# Poll EC readings\n");
-		while (dumpBlock(EC_JOY_REG1, EC_JOY_LEN, false)) {
-			// decode algorithms
+		while (true) {
+			result = i2c_readBytes(EC_I2C_DEV, EC_I2C_ADDR, EC_JOY_BASE, EC_JOY_LEN, joy);
+			dump(EC_JOY_BASE, EC_JOY_LEN, joy, result);
+			if (result != EC_JOY_LEN)  goto lost ;
+			printf("\r");
+
+			// decode(joy, controllerType);
 			// https://github.com/csBlueChip/FlipperZero_WiiEC/blob/main/wii_ec_classic.c#L39
 			// https://github.com/csBlueChip/FlipperZero_WiiEC/blob/main/wii_ec_nunchuck.c#L19
-			gpio_put(PICO_DEFAULT_LED_PIN, (led = !led)); // toggle LED
+
 			if (get_bootsel_button())  break ;  // check button (for reset)
-			sleep_ms(100);  // wait 1/10th second
+			ledToggle();                        // das blinken lights
+			sleep_ms(100);                      // don't cook the RP2040
 		}
 
+lost:
 		printf("\n! Connection Lost\n");
 		while (get_bootsel_button()) ;  // wait for button release
 
