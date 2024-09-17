@@ -162,6 +162,8 @@ int  main (void)
 
 
 	// --- Setup Das Blinken Lights ---
+	// ...only used here for visual debug (sans console)
+	// ...Slow (1s) flash: seeking;  Fast (0.1s) flash: reading
 	ledInit();
 
 
